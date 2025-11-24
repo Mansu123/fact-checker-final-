@@ -10,6 +10,7 @@ from config import settings
 from openai import OpenAI
 
 app = FastAPI(title="Fact Checker & MCQ Validator API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,7 +53,6 @@ class FactCheckRequest(BaseModel):
 
 
 class OptionValidation(BaseModel):
-    valid: bool
     feedback: str = ""
 
 
@@ -118,12 +118,12 @@ def normalize_answer(answer: str) -> str:
     # English: a) b) c) d) e) A) B) C) D) E)
     # Numbers: 1) 2) 3) 4) 5)
     patterns = [
-        r'^[ক-ঙ]\)\s*',  # Bengali options
-        r'^[a-eA-E]\)\s*',  # English options
-        r'^[1-5]\)\s*',  # Numbered options
-        r'^[ক-ঙ]\s*।\s*',  # Bengali with vertical bar
-        r'^[a-eA-E]\s*\.\s*',  # English with dot
-        r'^[1-5]\s*\.\s*',  # Numbers with dot
+        r'^[ক-ঙ]\)\s*',      # Bengali options
+        r'^[a-eA-E]\)\s*',    # English options
+        r'^[1-5]\)\s*',       # Numbered options
+        r'^[ক-ঙ]\s*।\s*',    # Bengali with vertical bar
+        r'^[a-eA-E]\s*\.\s*', # English with dot
+        r'^[1-5]\s*\.\s*',    # Numbers with dot
     ]
     
     normalized = answer.strip()
@@ -136,46 +136,124 @@ def normalize_answer(answer: str) -> str:
     return normalized.strip().lower()
 
 
+def detect_duplicates(options: List[str]) -> tuple:
+    """
+    Strictly detect duplicate options using Python comparison.
+    Returns (has_duplicates: bool, feedback: str)
+    """
+    # Filter out empty options
+    non_empty_options = [(i+1, opt.strip().lower()) for i, opt in enumerate(options) if opt and opt.strip()]
+    
+    if len(non_empty_options) < 2:
+        return False, ""
+    
+    # Find duplicates
+    duplicates = {}
+    for i, (idx1, opt1) in enumerate(non_empty_options):
+        for idx2, opt2 in non_empty_options[i+1:]:
+            if opt1 == opt2:  # Exact match only
+                if opt1 not in duplicates:
+                    duplicates[opt1] = [idx1]
+                if idx2 not in duplicates[opt1]:
+                    duplicates[opt1].append(idx2)
+    
+    if not duplicates:
+        return False, ""
+    
+    # Build feedback
+    feedback_parts = []
+    for value, indices in duplicates.items():
+        if len(indices) > 1:
+            options_str = " and ".join([f"Option {idx}" for idx in indices])
+            feedback_parts.append(f"{options_str} are duplicates (both have '{value}')")
+    
+    return True, ". ".join(feedback_parts) + "."
+
+
 def validate_structure_only(request: FactCheckRequest) -> Dict[str, Any]:
     """
-    ONLY validates grammar and structure.
-    Does NOT determine correct answer.
+    ✅ FIXED: Now strictly validates question logic and option appropriateness
+    Validates grammar, structure, and contextual relevance using GPT-4.
+    Checks for duplicates using strict Python comparison.
+    Does NOT determine which answer is correct.
     """
     try:
-        system_msg = """You are a grammar and structure validator.
-Check ONLY:
-1. Question: Is it grammatically correct and clear?
-2. Options: Are they grammatically correct?
-3. Explanation: If provided, is it grammatically correct?
+        system_msg = """You are a strict question and answer validator with expertise in logic and reasoning.
 
-DO NOT determine which answer is correct.
-DO NOT check factual accuracy.
-ONLY check grammar and clarity.
+Your job:
+1. Check if the QUESTION is LOGICALLY VALID and makes sense
+2. Check if each OPTION is appropriate for the question type
+
+QUESTION VALIDATION - BE STRICT:
+A question is INVALID if:
+- It contains logical contradictions (e.g., "How many days to pass a bill that hasn't been written yet?")
+- It asks about impossible scenarios or paradoxes
+- It has contradictory conditions (e.g., "if X doesn't exist, how does X work?")
+- It's grammatically nonsensical or incomplete
+- It's unclear or ambiguous to the point of being unanswerable
+
+LOGICAL VALIDATION - BE STRICT:
+Mark logical_valid as FALSE if:
+- Question contains logical contradictions
+- Options don't match question type (numbers for text questions, text for number questions)
+- Options are completely irrelevant or nonsensical
+- Question-option combination makes no sense
+
+OPTION VALIDATION - BE STRICT:
+Options are INVALID if:
+- Random meaningless numbers (e.g., "1111111", "999999") for non-numeric questions
+- Wrong type entirely (dates for math, numbers for history/law questions, words for arithmetic)
+- Completely irrelevant to the question context
+- Grammatically nonsensical
+- Obviously fake or placeholder text
+
+EXAMPLES OF INVALID SCENARIOS:
+
+❌ INVALID QUESTION:
+Q: "রাষ্ট্রপতি সংবিধান সংশোধন বিল কত দিনের মধ্যে পাশ করবেন যদি বিলটি এখনো লেখা না হয়?"
+(How many days will president pass a bill if the bill hasn't been written yet?)
+→ question_valid: FALSE, logical_valid: FALSE
+→ Feedback: "Logical contradiction - cannot pass a bill that doesn't exist yet"
+
+❌ INVALID OPTIONS:
+Q: "When was Bangladesh independence?" Options: "1111111", "999999", "5555555"
+→ option_valid: FALSE for all
+→ Feedback: "Random numbers are not valid years/dates"
+
+Q: "What is 2+2?" Options: "happy", "sad", "angry"
+→ option_valid: FALSE for all
+→ Feedback: "Text words are not valid for arithmetic questions"
+
+✅ VALID SCENARIO:
+Q: "What is the capital of Bangladesh?" Options: "Dhaka", "Chittagong", "Sylhet"
+→ All valid, logical, appropriate
+
+BE STRICT. If something is illogical, contradictory, or wrong type, mark it as INVALID with clear feedback.
 
 Return JSON:
 {
     "question_valid": true/false,
-    "question_feedback": "",
+    "question_feedback": "explain why question is invalid with specific reasons, or empty if valid",
     "logical_valid": true/false,
-    "logical_feedback": "",
+    "logical_feedback": "explain logical problems or question-option type mismatch, or empty if valid",
     "option1_valid": true/false,
-    "option1_feedback": "",
+    "option1_feedback": "explain why invalid with specific reason, or empty if valid",
     "option2_valid": true/false,
-    "option2_feedback": "",
+    "option2_feedback": "explain why invalid with specific reason, or empty if valid",
     "option3_valid": true/false,
-    "option3_feedback": "",
+    "option3_feedback": "explain why invalid with specific reason, or empty if valid",
     "option4_valid": true/false,
-    "option4_feedback": "",
-    "options_consistency_valid": true/false,
-    "options_consistency_feedback": "",
+    "option4_feedback": "explain why invalid with specific reason, or empty if valid",
     "explanation_valid": true/false,
     "explanation_feedback": ""
 }
+
 Return ONLY JSON."""
 
         has_exp = bool(request.explanation and request.explanation.strip())
         
-        human_msg = f"""Check grammar and structure only:
+        human_msg = f"""Strictly validate this question and options. BE STRICT about logic and appropriateness:
+
 Question: {request.question}
 Option 1: {request.option1}
 Option 2: {request.option2}
@@ -183,6 +261,17 @@ Option 3: {request.option3}
 Option 4: {request.option4}
 Option 5: {request.option5}
 Explanation: {request.explanation if has_exp else 'NOT PROVIDED'}
+
+Check thoroughly:
+1. Is the QUESTION logically valid? Any contradictions or impossible scenarios?
+2. Are OPTIONS the right TYPE for this question? (e.g., dates for history, numbers for math)
+3. Are options meaningful or just random gibberish?
+4. Does the question-option combination make logical sense?
+
+BE STRICT. Mark as INVALID if:
+- Question has logical contradictions
+- Options are wrong type (random numbers for non-numeric questions, etc.)
+- Options are meaningless or clearly fake
 
 Return JSON."""
 
@@ -193,6 +282,13 @@ Return JSON."""
         if not has_exp:
             result['explanation_valid'] = False
             result['explanation_feedback'] = "Not provided"
+        
+        # Use Python-based duplicate detection for accuracy
+        options = [request.option1, request.option2, request.option3, request.option4, request.option5]
+        has_duplicates, duplicate_feedback = detect_duplicates(options)
+        
+        result['options_consistency_valid'] = not has_duplicates
+        result['options_consistency_feedback'] = duplicate_feedback
         
         return result
         
@@ -212,23 +308,31 @@ Return JSON."""
 
 
 def get_answer_from_explanation(explanation: str, question: str, options: List[str]) -> Optional[str]:
-    """Extract answer from valid explanation - IMPROVED VERSION"""
+    """
+    ✅ FIXED: Validate INPUT explanation by comparing with DATASET answer
+    
+    Process:
+    1. Extract answer from INPUT explanation using GPT
+    2. Get correct answer from DATASET
+    3. Compare both answers
+    4. If they MATCH → Explanation is TRUE, use it
+    5. If they DON'T MATCH → Explanation is FALSE, skip it
+    """
     try:
-        print("\n📝 Extracting answer from explanation...")
+        print("\n📝 VALIDATING INPUT EXPLANATION AGAINST DATASET...")
+        
+        # STEP 1: Extract answer from INPUT explanation using GPT
+        print("  Step 1: Extracting answer from INPUT explanation using GPT...")
         
         system_msg = """You are an expert at analyzing explanations to determine the correct answer.
-Read the explanation carefully and determine which option it supports.
 
-IMPORTANT: 
-- Base your answer ONLY on what the explanation says
-- The explanation will clearly indicate which option is correct
-- Return the EXACT TEXT of the correct option from the provided options
+Read the explanation carefully and determine which option it supports.
 
 Return ONLY JSON:
 {
     "answer": "the correct answer as EXACT TEXT from options",
     "confidence": 95,
-    "reasoning": "brief explanation of why this option matches the explanation"
+    "reasoning": "brief explanation"
 }"""
         
         opts = "\n".join([f"{i+1}. {o}" for i, o in enumerate(options) if o])
@@ -240,26 +344,78 @@ Options:
 
 Explanation: {explanation}
 
-Based on this explanation, what is the correct answer? Return ONLY JSON with the EXACT option text."""
+What answer does this explanation support? Return ONLY JSON."""
 
         response = call_gpt4(system_msg, user_msg)
         result = json.loads(clean_json(response))
         
-        answer = result.get('answer', '').strip()
+        explanation_answer = result.get('answer', '').strip()
         confidence = result.get('confidence', 0)
-        reasoning = result.get('reasoning', '')
         
-        if answer and confidence >= 70:
-            print(f"✓ From explanation: '{answer}'")
-            print(f"  Confidence: {confidence}%")
-            print(f"  Reasoning: {reasoning}")
-            return answer
-        else:
-            print(f"✗ Low confidence ({confidence}%) from explanation")
+        if not explanation_answer or confidence < 70:
+            print(f"    ✗ Could not extract answer from explanation (confidence: {confidence}%)")
             return None
+        
+        print(f"    ✓ INPUT Explanation says answer is: '{explanation_answer}'")
+        
+        # STEP 2: Get correct answer from DATASET
+        print("  Step 2: Getting correct answer from DATASET...")
+        
+        query_emb = embedding_service.embed_query(question)
+        results = vector_db.search(COLLECTION_NAME, query_emb, top_k=10)
+        
+        if not results:
+            print("    ✗ No dataset results found - cannot validate explanation")
+            return None
+        
+        best = max(results, key=lambda x: x.get('score', 0))
+        similarity = best.get('score', 0)
+        
+        if similarity < 0.12:
+            print(f"    ✗ Dataset similarity too low ({similarity:.4f}) - cannot validate")
+            return None
+        
+        print(f"    ✓ Found similar question in dataset (similarity: {similarity:.4f})")
+        
+        # Get dataset answer
+        dataset_answer = None
+        try:
+            stored_options = json.loads(best.get('options', '{}'))
+            answer_num = best.get('answer')
             
+            if answer_num:
+                dataset_answer = stored_options.get(f'option{answer_num}', '').strip()
+                print(f"    ✓ DATASET says correct answer is: '{dataset_answer}'")
+        except Exception as e:
+            print(f"    ✗ Error getting dataset answer: {e}")
+            return None
+        
+        if not dataset_answer:
+            print("    ✗ No answer in dataset - cannot validate")
+            return None
+        
+        # STEP 3: Compare INPUT explanation answer with DATASET answer
+        print("  Step 3: Comparing INPUT explanation with DATASET answer...")
+        
+        explanation_normalized = normalize_answer(explanation_answer)
+        dataset_normalized = normalize_answer(dataset_answer)
+        
+        print(f"    INPUT Explanation answer (normalized): '{explanation_normalized}'")
+        print(f"    DATASET answer (normalized): '{dataset_normalized}'")
+        
+        if explanation_normalized == dataset_normalized:
+            print("    ✅ MATCH! INPUT Explanation is CORRECT ✅")
+            print("    → Using answer from INPUT explanation")
+            return explanation_answer
+        else:
+            print("    ❌ NO MATCH! INPUT Explanation is FALSE ❌")
+            print(f"    → INPUT Explanation gives: '{explanation_answer}'")
+            print(f"    → DATASET correct answer: '{dataset_answer}'")
+            print("    → SKIPPING INPUT explanation, will try other sources")
+            return None
+        
     except Exception as e:
-        print(f"✗ Explanation extraction error: {e}")
+        print(f"✗ Explanation validation error: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -301,8 +457,8 @@ def get_answer_from_dataset(question: str, options: List[str]) -> Optional[str]:
                 
                 # Priority 1: Check if explanation exists and extract answer from it
                 if stored_explanation:
-                    print("  ✓ Explanation found in dataset")
-                    print(f"    Explanation: {stored_explanation[:100]}...")
+                    print("    ✓ Explanation found in dataset")
+                    print(f"      Explanation: {stored_explanation[:100]}...")
                     
                     # Extract answer from dataset explanation
                     dataset_options = [
@@ -312,22 +468,30 @@ def get_answer_from_dataset(question: str, options: List[str]) -> Optional[str]:
                         stored_options.get('option4', '')
                     ]
                     
-                    extracted_answer = get_answer_from_explanation(
-                        stored_explanation, 
-                        matched_question, 
-                        dataset_options
-                    )
-                    
-                    if extracted_answer:
-                        # Try to match with current question's options
-                        for opt in options:
-                            if opt.strip().lower() == extracted_answer.strip().lower():
-                                print(f"    ✓ Answer from dataset explanation: '{opt}'")
-                                return opt
+                    # Use a simplified extraction for dataset explanation
+                    try:
+                        system_msg = """Extract the correct answer from this explanation.
+Return ONLY JSON: {"answer": "answer text", "confidence": 90}"""
                         
-                        # If exact match not found, return extracted answer
-                        print(f"    ✓ Answer from dataset explanation: '{extracted_answer}'")
-                        return extracted_answer
+                        opts_text = "\n".join([f"{i+1}. {o}" for i, o in enumerate(dataset_options) if o])
+                        user_msg = f"Question: {matched_question}\n\nOptions:\n{opts_text}\n\nExplanation: {stored_explanation}\n\nReturn ONLY JSON."
+                        
+                        response = call_gpt4(system_msg, user_msg)
+                        result = json.loads(clean_json(response))
+                        extracted_answer = result.get('answer', '').strip()
+                        
+                        if extracted_answer:
+                            # Try to match with current question's options
+                            for opt in options:
+                                if opt.strip().lower() == extracted_answer.strip().lower():
+                                    print(f"      ✓ Answer from dataset explanation: '{opt}'")
+                                    return opt
+                            
+                            # If exact match not found, return extracted answer
+                            print(f"      ✓ Answer from dataset explanation: '{extracted_answer}'")
+                            return extracted_answer
+                    except:
+                        pass
                 
                 # Priority 2: Use answer number to get text option
                 if answer_num:
@@ -347,7 +511,7 @@ def get_answer_from_dataset(question: str, options: List[str]) -> Optional[str]:
                         print(f"    ✗ Could not get text for option {answer_num}")
                 else:
                     print("    ✗ No answer number in dataset")
-                    
+                
             except Exception as e:
                 print(f"    ✗ Error extracting from dataset: {e}")
                 import traceback
@@ -402,7 +566,7 @@ If you don't know: {"answer": "", "confidence": 0, "reasoning": "Unknown"}"""
         else:
             print(f"✗ GPT Knowledge: Low confidence ({confidence}%) or no answer")
             return None
-            
+        
     except Exception as e:
         print(f"✗ GPT Knowledge error: {e}")
         import traceback
@@ -470,7 +634,7 @@ If articles don't contain the answer: {"answer": "", "confidence": 0, "source": 
         else:
             print("✗ Trusted News: No confident answer found")
             return None
-            
+        
     except Exception as e:
         print(f"✗ News error: {e}")
         return None
@@ -479,8 +643,13 @@ If articles don't contain the answer: {"answer": "", "confidence": 0, "source": 
 @app.post("/fact-check", response_model=FactCheckResponse)
 async def fact_check(request: FactCheckRequest):
     """
-    Complete fact checking with UPDATED source priority:
-    1. Explanation (if provided and valid)
+    Complete fact checking with TWO FIXES:
+    
+    ✅ FIX 1: INPUT Explanation validated against DATASET
+    ✅ FIX 2: Strict question and logical validation using GPT-4
+    
+    Source Priority:
+    1. INPUT Explanation (if provided AND matches dataset answer)
     2. Dataset (similar question with explanation or answer number)
     3. GPT-4 Knowledge Base (using OpenAI API key)
     4. Trusted News Sources (Prothom Alo, The Daily Star, BBC Bangla, Bangladesh Pratidin, NCTB)
@@ -499,12 +668,12 @@ async def fact_check(request: FactCheckRequest):
         print(f"Explanation: {'PROVIDED' if has_exp else 'NOT PROVIDED'}")
         print(f"{'='*80}\n")
         
-        # STEP 1: Validate structure (grammar only)
-        print("STEP 1: Validating structure and grammar...")
+        # STEP 1: Validate structure with STRICT logic checking
+        print("STEP 1: Validating question logic, grammar, and options (STRICT)...")
         validation = validate_structure_only(request)
         print("✓ Validation complete\n")
         
-        # STEP 2: Find correct answer using UPDATED source priority
+        # STEP 2: Find correct answer using source priority WITH EXPLANATION FIX
         print(f"{'='*80}")
         print("STEP 2: Finding Correct Answer")
         print(f"{'='*80}")
@@ -512,15 +681,15 @@ async def fact_check(request: FactCheckRequest):
         final_answer = None
         options = [request.option1, request.option2, request.option3, request.option4]
         
-        # SOURCE 1: From explanation (if provided - regardless of validation)
+        # SOURCE 1: From INPUT explanation (WITH DATASET VALIDATION)
         if has_exp:
-            print("\n→ SOURCE 1: Explanation (provided)")
+            print("\n→ SOURCE 1: INPUT Explanation (validating against dataset)")
             final_answer = get_answer_from_explanation(request.explanation, request.question, options)
             
             if final_answer:
-                print("✓ SOURCE 1 SUCCESS")
+                print("✓ SOURCE 1 SUCCESS - INPUT Explanation MATCHES dataset")
             else:
-                print("✗ SOURCE 1 FAILED (could not extract answer)")
+                print("✗ SOURCE 1 FAILED - INPUT Explanation does NOT match dataset or invalid")
         else:
             print("\n✗ SOURCE 1: Explanation (not provided)")
         
@@ -603,23 +772,18 @@ async def fact_check(request: FactCheckRequest):
             logical_valid=validation.get('logical_valid', True),
             options=OptionsValidation(
                 option1=OptionValidation(
-                    valid=validation.get('option1_valid', True),
                     feedback=validation.get('option1_feedback', '')
                 ),
                 option2=OptionValidation(
-                    valid=validation.get('option2_valid', True),
                     feedback=validation.get('option2_feedback', '')
                 ),
                 option3=OptionValidation(
-                    valid=validation.get('option3_valid', True),
                     feedback=validation.get('option3_feedback', '')
                 ),
                 option4=OptionValidation(
-                    valid=validation.get('option4_valid', True),
                     feedback=validation.get('option4_feedback', '')
                 ),
                 option5=OptionValidation(
-                    valid=validation.get('option5_valid', True),
                     feedback=validation.get('option5_feedback', '')
                 ),
                 options_consistency_valid=validation.get('options_consistency_valid', True),
@@ -646,11 +810,19 @@ if __name__ == "__main__":
     print(f"\n{'='*80}")
     print("🚀 Fact Checker & MCQ Validator API")
     print(f"{'='*80}")
+    print("✅ FIX 1: INPUT Explanation Validation Against Dataset")
+    print("✅ FIX 2: Strict Question & Logical Validation")
+    print("="*80)
+    print("Now detects:")
+    print("  - Illogical questions (contradictions, impossible scenarios)")
+    print("  - Wrong option types (random numbers for non-numeric questions)")
+    print("  - False explanations (comparing with dataset)")
+    print("="*80)
     print("Source Priority:")
-    print("  1. Explanation (if provided)")
-    print("  2. Dataset (explanation first, then answer number)")
-    print("  3. GPT-4 Knowledge Base (OpenAI API)")
-    print("  4. Trusted News Sources (Prothom Alo, The Daily Star, BBC Bangla, etc.)")
+    print("  1. INPUT Explanation (if matches dataset)")
+    print("  2. Dataset (similar question)")
+    print("  3. GPT-4 Knowledge Base")
+    print("  4. Trusted News Sources")
     print(f"{'='*80}\n")
     
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)

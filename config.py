@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
     
+    # News API (⭐ NEW - for news agent)
+    news_api_key: Optional[str] = None
+    
     # OpenSearch Configuration
     opensearch_host: str = "localhost"
     opensearch_port: int = 9200

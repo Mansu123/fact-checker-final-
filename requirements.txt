@@ -1,15 +1,18 @@
 
-# Fixed requirements with compatible versions for M1/M2 Mac
+# Updated requirements.txt with NewsAPI support for trusted news source
+
+# FastAPI and web framework
 fastapi
 uvicorn
 pydantic
 pydantic-settings
 
-# OpenAI with compatible httpx versions
+# OpenAI
 openai
 httpx
 httpcore
 
+# Langchain (for embeddings)
 langchain
 langchain-openai
 langchain-community
@@ -19,7 +22,7 @@ langchain-core
 torch
 torchvision
 
-# OpenSearch
+# OpenSearch (Vector Database)
 opensearch-py
 
 # MySQL
@@ -31,11 +34,12 @@ pandas
 numpy
 tqdm
 
-# Web scraping
+# Web scraping and news
 requests
 beautifulsoup4
 feedparser
 lxml
+newsapi-python  # NEW - Required for trusted news source
 
 # Utilities
 python-dotenv
@@ -46,3 +50,7 @@ schedule
 sentence-transformers
 Jinja2
 language-tool-python
+
+# Testing (optional but recommended)
+pytest
+pytest-asyncio

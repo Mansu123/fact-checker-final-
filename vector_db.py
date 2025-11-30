@@ -1,4 +1,3 @@
-
 import json
 import os
 from typing import List, Dict, Any, Optional
@@ -203,17 +202,13 @@ class DirectOpenAIEmbeddings:
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i+batch_size]
             
-            # Filter and clean batch - remove empty/None/invalid texts
             cleaned_batch = []
             for text in batch:
                 if text and isinstance(text, str) and text.strip():
-                    # Clean the text
                     cleaned_text = text.strip()
-                    # Replace any null characters that might cause issues
                     cleaned_text = cleaned_text.replace('\x00', '')
                     cleaned_batch.append(cleaned_text)
                 else:
-                    # Replace empty with placeholder
                     cleaned_batch.append("placeholder text")
             
             try:
@@ -225,20 +220,17 @@ class DirectOpenAIEmbeddings:
                 print(f"  Batch size: {len(cleaned_batch)}")
                 print(f"  Processing items individually...")
                 
-                # Process one by one to find problematic item
                 for j, text in enumerate(cleaned_batch):
                     try:
                         response = self.client.embeddings.create(input=[text], model=self.model)
                         embeddings.append(response.data[0].embedding)
                     except:
                         print(f"  Skipping item {i+j}: {text[:50]}...")
-                        # Use zero vector as placeholder
-                        embeddings.append([0.0] * 1536)  # text-embedding-3-small dimension
+                        embeddings.append([0.0] * 1536)
         
         return embeddings
     
     def embed_query(self, text: str) -> List[float]:
-        # Clean text
         if not text or not isinstance(text, str):
             text = "placeholder"
         text = text.strip().replace('\x00', '')
@@ -246,19 +238,93 @@ class DirectOpenAIEmbeddings:
         response = self.client.embeddings.create(input=[text], model=self.model)
         return response.data[0].embedding
 
+class DirectGeminiEmbeddings:
+    """Direct Gemini API embeddings"""
+    
+    def __init__(self, model: str, api_key: str):
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        self.model = model
+        print(f"✓ Using Gemini embeddings: {model}")
+    
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        import google.generativeai as genai
+        embeddings = []
+        batch_size = 100
+        
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            
+            cleaned_batch = []
+            for text in batch:
+                if text and isinstance(text, str) and text.strip():
+                    cleaned_text = text.strip()
+                    cleaned_text = cleaned_text.replace('\x00', '')
+                    cleaned_batch.append(cleaned_text)
+                else:
+                    cleaned_batch.append("placeholder text")
+            
+            try:
+                for text in cleaned_batch:
+                    result = genai.embed_content(
+                        model=self.model,
+                        content=text,
+                        task_type="retrieval_document"
+                    )
+                    embeddings.append(result['embedding'])
+            except Exception as e:
+                print(f"\n✗ Error in batch {i//batch_size + 1}: {e}")
+                print(f"  Batch size: {len(cleaned_batch)}")
+                print(f"  Processing items individually...")
+                
+                for j, text in enumerate(cleaned_batch):
+                    try:
+                        result = genai.embed_content(
+                            model=self.model,
+                            content=text,
+                            task_type="retrieval_document"
+                        )
+                        embeddings.append(result['embedding'])
+                    except:
+                        print(f"  Skipping item {i+j}: {text[:50]}...")
+                        embeddings.append([0.0] * 768)
+        
+        return embeddings
+    
+    def embed_query(self, text: str) -> List[float]:
+        import google.generativeai as genai
+        
+        if not text or not isinstance(text, str):
+            text = "placeholder"
+        text = text.strip().replace('\x00', '')
+        
+        result = genai.embed_content(
+            model=self.model,
+            content=text,
+            task_type="retrieval_query"
+        )
+        return result['embedding']
+
 class EmbeddingService:
     """Service for generating embeddings"""
     
     def __init__(self):
         self.embedding_type = settings.embedding_type
         
-        if self.embedding_type == "local":
-            raise Exception("Local embeddings have dependency issues. Please use: EMBEDDING_TYPE=openai in .env")
-        else:
+        if self.embedding_type == "gemini":
+            if not settings.google_api_key:
+                raise Exception("GOOGLE_API_KEY not found in .env file")
+            self.embeddings = DirectGeminiEmbeddings(
+                model=settings.gemini_embedding_model,
+                api_key=settings.google_api_key
+            )
+        elif self.embedding_type == "openai":
             self.embeddings = DirectOpenAIEmbeddings(
                 model=settings.embedding_model,
                 api_key=settings.openai_api_key
             )
+        else:
+            raise Exception("Invalid embedding_type. Use 'openai' or 'gemini'")
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         return self.embeddings.embed_documents(texts)

@@ -7,7 +7,10 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
     
-    # News API (⭐ NEW - for news agent)
+    # Google Gemini
+    google_api_key: Optional[str] = None
+    
+    # News API
     news_api_key: Optional[str] = None
     
     # OpenSearch Configuration
@@ -34,11 +37,15 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 7001
     
+    # LLM Configuration
+    llm_provider: str = "gemini"  # "openai" or "gemini"
+    
     # Embedding Configuration
-    embedding_type: str = "local"  # "openai" or "local"
+    embedding_type: str = "openai"  # "openai" or "gemini"
     embedding_model: str = "text-embedding-3-small"
+    gemini_embedding_model: str = "models/text-embedding-004"
     local_embedding_model: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    use_gpu: bool = True  # Use M1 GPU (MPS) for local embeddings
+    use_gpu: bool = True
     chunk_size: int = 1000
     chunk_overlap: int = 200
     

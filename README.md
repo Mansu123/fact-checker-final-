@@ -36,7 +36,7 @@ USER INPUT
 │     → Confidence must be ≥70%                       │
 │     → If confident → DONE                           │
 │                                                      │
-│  📰 SOURCE 3: Trusted News Sources                  │
+│  📰 SOURCE 3: Trusted News Sources gpt web search                 │
 │     IF GPT-4 doesn't know                           │
 │     → Search vector DB for news                     │
 │     → Only use: Prothom Alo, The Daily Star,       │

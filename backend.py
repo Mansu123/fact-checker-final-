@@ -7,9 +7,7 @@ import json
 import re
 from vector_db import get_vector_db, EmbeddingService
 from config import settings
-from openai import OpenAI
-
-
+from llm_service import get_llm_service
 
 
 app = FastAPI(title="Fact Checker & MCQ Validator API")
@@ -26,24 +24,16 @@ app.add_middleware(
 
 vector_db = get_vector_db()
 embedding_service = EmbeddingService()
-openai_client = OpenAI(api_key=settings.openai_api_key)
+llm_service = get_llm_service()
 
 
 COLLECTION_NAME = "fact_check_questions"
 NEWS_COLLECTION_NAME = "news_articles"
 
 
-def call_gpt4(system_message: str, user_message: str) -> str:
-   """Helper function to call GPT-4 directly"""
-   response = openai_client.chat.completions.create(
-       model="gpt-4",
-       temperature=0,  # ✅ Deterministic for accuracy
-       messages=[
-           {"role": "system", "content": system_message},
-           {"role": "user", "content": user_message}
-       ]
-   )
-   return response.choices[0].message.content
+def call_llm(system_message: str, user_message: str, temperature: float = 0, max_tokens: int = 2500) -> str:
+   """Helper function to call configured LLM (OpenAI or Gemini)"""
+   return llm_service.chat_completion(system_message, user_message, temperature, max_tokens)
 
 
 class FactCheckRequest(BaseModel):
@@ -55,7 +45,7 @@ class FactCheckRequest(BaseModel):
    option4: str
    option5: Optional[str] = None
    explanation: Optional[str] = None
-   explain: Optional[str] = None  # ✅ Support "explain" field too
+   explain: Optional[str] = None
    language: Optional[str] = "auto"
   
    def get_explanation(self) -> Optional[str]:
@@ -89,14 +79,14 @@ class FactCheckResponse(BaseModel):
 
 @app.get("/")
 async def root():
-   return {"message": "Fact Checker & MCQ Validator API", "status": "online"}
+   return {"message": "Fact Checker & MCQ Validator API", "status": "online", "llm_provider": settings.llm_provider}
 
 
 @app.get("/health")
 async def health():
    try:
        test_embedding = embedding_service.embed_query("test")
-       return {"status": "healthy"}
+       return {"status": "healthy", "llm_provider": settings.llm_provider, "embedding_type": settings.embedding_type}
    except Exception as e:
        return {"status": "unhealthy", "error": str(e)}
 
@@ -124,21 +114,19 @@ def normalize_answer(answer: str) -> str:
    if not answer:
        return ""
   
-   # Remove common option prefixes
    patterns = [
-       r'^[ক-ঙ]\)\s*',      # Bengali options
-       r'^[a-eA-E]\)\s*',    # English options
-       r'^[1-5]\)\s*',       # Numbered options
-       r'^[ক-ঙ]\s*।\s*',    # Bengali with vertical bar
-       r'^[a-eA-E]\s*\.\s*', # English with dot
-       r'^[1-5]\s*\.\s*',    # Numbers with dot
+       r'^[ক-ঙ]\)\s*',
+       r'^[a-eA-E]\)\s*',
+       r'^[1-5]\)\s*',
+       r'^[ক-ঙ]\s*।\s*',
+       r'^[a-eA-E]\s*\.\s*',
+       r'^[1-5]\s*\.\s*',
    ]
   
    normalized = answer.strip()
    for pattern in patterns:
        normalized = re.sub(pattern, '', normalized)
   
-   # Remove extra whitespace
    normalized = ' '.join(normalized.split())
   
    return normalized.strip().lower()
@@ -149,17 +137,15 @@ def detect_duplicates(options: List[str]) -> tuple:
    ✅ CORRECT: Strictly detect duplicate options using Python comparison
    Returns (has_duplicates: bool, feedback: str)
    """
-   # Filter out empty options
    non_empty_options = [(i+1, opt.strip().lower()) for i, opt in enumerate(options) if opt and opt.strip()]
   
    if len(non_empty_options) < 2:
        return False, ""
   
-   # Find duplicates
    duplicates = {}
    for i, (idx1, opt1) in enumerate(non_empty_options):
        for idx2, opt2 in non_empty_options[i+1:]:
-           if opt1 == opt2:  # Exact match only
+           if opt1 == opt2:
                if opt1 not in duplicates:
                    duplicates[opt1] = [idx1]
                if idx2 not in duplicates[opt1]:
@@ -168,7 +154,6 @@ def detect_duplicates(options: List[str]) -> tuple:
    if not duplicates:
        return False, ""
   
-   # Build feedback
    feedback_parts = []
    for value, indices in duplicates.items():
        if len(indices) > 1:
@@ -180,10 +165,10 @@ def detect_duplicates(options: List[str]) -> tuple:
 
 def validate_explanation_correctness(explanation: str, question: str, answer: str, options: List[str]) -> Dict[str, Any]:
    """
-   ✅ IMPROVED: Validate if explanation is correct using GPT properly for ALL types
+   ✅ IMPROVED: Validate if explanation is correct using configured LLM
    """
    try:
-       print("\n🔍 Validating explanation correctness with GPT...")
+       print("\n🔍 Validating explanation correctness...")
       
        validation_system = """You are an expert fact-checker, mathematician, and educator. Your job is to validate if explanations are correct.
 
@@ -278,18 +263,17 @@ Task: Is this explanation correct?
 Return ONLY JSON with is_valid, confidence, and reasoning."""
 
 
-       response = call_gpt4(validation_system, validation_user)
+       response = call_llm(validation_system, validation_user)
        result = json.loads(clean_json(response))
       
        is_valid = result.get('is_valid', False)
        confidence = result.get('confidence', 0)
        reasoning = result.get('reasoning', '')
       
-       print(f"  GPT Validation: {'✅ VALID' if is_valid else '❌ INVALID'}")
+       print(f"  LLM Validation: {'✅ VALID' if is_valid else '❌ INVALID'}")
        print(f"  Confidence: {confidence}%")
        print(f"  Reasoning: {reasoning}")
       
-       # Lower threshold to 60% to be more lenient
        return {
            'is_valid': is_valid and confidence >= 60,
            'confidence': confidence,
@@ -304,9 +288,6 @@ Return ONLY JSON with is_valid, confidence, and reasoning."""
 def validate_structure_only(request: FactCheckRequest) -> Dict[str, Any]:
    """
    ✅ CORRECT: Validates question with reasonable strictness
-   - Not too strict for Bengali questions
-   - Checks basic grammar and logic
-   - Allows minor imperfections
    """
    try:
        system_msg = """You are a question validator. Check if the question and options are reasonable and understandable.
@@ -318,7 +299,7 @@ def validate_structure_only(request: FactCheckRequest) -> Dict[str, Any]:
 QUESTION VALIDATION:
 Mark as INVALID only if:
 - Question is completely nonsensical or gibberish
-- Question has severe logical contradictions (e.g., asking about something that cannot exist)
+- Question has severe logical contradictions
 - Question is impossible to understand
 - Question is incomplete to the point of being unanswerable
 
@@ -332,8 +313,8 @@ Mark as INVALID only if:
 
 LOGICAL VALIDATION:
 Mark logical_valid as FALSE only if:
-- Severe logical contradictions (not minor inconsistencies)
-- Options are completely wrong type (e.g., random gibberish for a valid question)
+- Severe logical contradictions
+- Options are completely wrong type
 - Question-option combination makes no sense at all
 
 
@@ -346,40 +327,14 @@ Mark logical_valid as FALSE only if:
 OPTION VALIDATION:
 Mark options as INVALID only if:
 - Completely meaningless gibberish
-- Obviously fake placeholder text (e.g., "xxxxxxxx", "test123")
-- Totally wrong type (words for pure arithmetic, random numbers for text questions)
+- Obviously fake placeholder text
+- Totally wrong type for question
 
 
 ✅ Mark as VALID if:
 - Options make sense for the question
 - Options are readable and meaningful
 - Minor formatting issues are acceptable
-
-
-EXAMPLES:
-
-
-❌ INVALID QUESTION:
-Q: "asdfkjalksdjflk aksjdf" (gibberish)
-→ question_valid: FALSE
-
-
-❌ SEVERE LOGICAL PROBLEM:
-Q: "What is the color of mathematics?" Options: "Blue", "Fast", "৭", "Table"
-→ logical_valid: FALSE (nonsensical concept + unrelated options)
-
-
-✅ VALID QUESTION (even with minor issues):
-Q: "সংবিধানের কোন সংশোধনীর মাধ্যমে উপ-রাষ্ট্রপতি পদ বিলুপ্ত করা হয়?"
-(Which amendment abolished vice-president post?)
-Options: "ক) পঞ্চম", "খ) ষষ্ঠ", "গ) একাদশ", "ঘ) দ্বাদশ"
-→ question_valid: TRUE, logical_valid: TRUE, all options valid ✅
-
-
-✅ VALID - Minor grammar but understandable:
-Q: "Who first introduce gold coins in subcontinent?" (minor grammar issue)
-Options: "Guptas", "Kushanas", "Mauryas", "Delhi Sultans"
-→ All VALID ✅ (understandable despite minor grammar)
 
 
 BE REASONABLE. If a human can understand it, mark it VALID.
@@ -407,7 +362,6 @@ Return JSON:
 Return ONLY JSON."""
 
 
-       # ✅ Support both "explanation" and "explain" fields
        explanation_text = request.get_explanation()
        has_exp = bool(explanation_text and explanation_text.strip())
       
@@ -435,15 +389,13 @@ Be REASONABLE. Mark as valid if humans can understand it.
 Return JSON."""
 
 
-       response = call_gpt4(system_msg, human_msg)
+       response = call_llm(system_msg, human_msg)
        result = json.loads(clean_json(response))
       
-       # Force explanation_valid = false if not provided
        if not has_exp:
            result['explanation_valid'] = False
            result['explanation_feedback'] = "Not provided"
       
-       # Use Python-based duplicate detection for accuracy
        options = [request.option1, request.option2, request.option3, request.option4, request.option5]
        has_duplicates, duplicate_feedback = detect_duplicates(options)
       
@@ -469,7 +421,7 @@ Return JSON."""
 
 def get_answer_from_explanation(explanation: str, question: str, options: List[str]) -> Optional[str]:
    """
-   ✅ IMPROVED: Extract answer from explanation with better handling
+   ✅ IMPROVED: Extract answer from explanation
    """
    try:
        print("\n📝 Extracting answer from explanation...")
@@ -523,14 +475,14 @@ What is the FINAL ANSWER according to this explanation?
 Return ONLY JSON."""
 
 
-       response = call_gpt4(system_msg, user_msg)
+       response = call_llm(system_msg, user_msg)
        result = json.loads(clean_json(response))
       
        explanation_answer = result.get('answer', '').strip()
        confidence = result.get('confidence', 0)
        reasoning = result.get('reasoning', '')
       
-       if not explanation_answer or confidence < 50:  # Lower threshold
+       if not explanation_answer or confidence < 50:
            print(f"  ✗ Could not extract answer (confidence: {confidence}%)")
            return None
       
@@ -547,8 +499,6 @@ Return ONLY JSON."""
 def get_answer_from_dataset(question: str, options: List[str]) -> Optional[str]:
    """
    ✅ CORRECT: Find SAME/SIMILAR question in dataset and return its answer
-   - Higher similarity threshold (0.85) to ensure accurate matches
-   - Validates options match before accepting dataset answer
    """
    try:
        print("\n💾 Searching dataset for same/similar question...")
@@ -570,7 +520,6 @@ def get_answer_from_dataset(question: str, options: List[str]) -> Optional[str]:
        print(f"  Similarity: {similarity:.4f}")
        print(f"  Question: {matched_question[:100]}...")
       
-       # ✅ CORRECT: Much higher threshold (0.85)
        if similarity >= 0.85:
            print(f"  ✓ HIGH similarity - This looks like the SAME question")
            try:
@@ -578,7 +527,6 @@ def get_answer_from_dataset(question: str, options: List[str]) -> Optional[str]:
                answer_num = best.get('answer')
                stored_explanation = best.get('explanation', '').strip()
               
-               # ✅ CORRECT: Validate that dataset options match current options
                dataset_options = [
                    stored_options.get('option1', '').strip(),
                    stored_options.get('option2', '').strip(),
@@ -586,7 +534,6 @@ def get_answer_from_dataset(question: str, options: List[str]) -> Optional[str]:
                    stored_options.get('option4', '').strip()
                ]
               
-               # Check how many options match
                matching_options = 0
                for curr_opt in options:
                    curr_opt_norm = normalize_answer(curr_opt)
@@ -598,16 +545,19 @@ def get_answer_from_dataset(question: str, options: List[str]) -> Optional[str]:
               
                print(f"  Options matching: {matching_options}/{len(options)}")
               
-               # ✅ CORRECT: Require at least 3 out of 4 options to match
-               if matching_options < 3:
-                   print(f"  ✗ Options don't match well enough ({matching_options}/4)")
-                   print(f"  → This is a DIFFERENT question, not using dataset answer")
-                   print(f"  → Will try GPT Knowledge Base instead")
+               # ✅ RELAXED: For perfect/near-perfect matches (>= 0.95), require only 2/4 options
+               # For lower similarity (0.85-0.95), require 3/4 options
+               required_matches = 2 if similarity >= 0.95 else 3
+               
+               if matching_options < required_matches:
+                   print(f"  ✗ Options don't match well enough ({matching_options}/{len(options)}, need {required_matches})")
+                   print(f"  → Similarity: {similarity:.4f}, Required matches: {required_matches}")
+                   print(f"  → This might be a similar but different question")
+                   print(f"  → Will try LLM Knowledge Base instead")
                    return None
               
                print(f"  ✓ Options match well - This is definitely the same question")
               
-               # Priority 1: Check if explanation exists
                if stored_explanation:
                    print("  ✓ Explanation found in dataset")
                    print(f"  Explanation: {stored_explanation[:100]}...")
@@ -626,7 +576,7 @@ Return ONLY JSON: {"answer": "answer text", "confidence": 90}"""
                        opts_text = "\n".join([f"{i+1}. {o}" for i, o in enumerate(dataset_options_full) if o])
                        user_msg = f"Question: {matched_question}\n\nOptions:\n{opts_text}\n\nExplanation: {stored_explanation}\n\nReturn ONLY JSON."
                       
-                       response = call_gpt4(system_msg, user_msg)
+                       response = call_llm(system_msg, user_msg)
                        result = json.loads(clean_json(response))
                        extracted_answer = result.get('answer', '').strip()
                       
@@ -641,7 +591,6 @@ Return ONLY JSON: {"answer": "answer text", "confidence": 90}"""
                    except:
                        pass
               
-               # Priority 2: Use answer number
                if answer_num:
                    answer_text = stored_options.get(f'option{answer_num}', '').strip()
                   
@@ -665,7 +614,7 @@ Return ONLY JSON: {"answer": "answer text", "confidence": 90}"""
        else:
            print(f"  ✗ Similarity too low ({similarity:.4f} < 0.85)")
            print(f"  → This is NOT the same question")
-           print(f"  → Will try GPT Knowledge Base instead")
+           print(f"  → Will try LLM Knowledge Base instead")
       
        return None
       
@@ -676,244 +625,210 @@ Return ONLY JSON: {"answer": "answer text", "confidence": 90}"""
        return None
 
 
-def get_answer_from_gpt_knowledge(question: str, options: List[str]) -> Optional[str]:
+def get_answer_from_llm_knowledge(question: str, options: List[str]) -> Optional[str]:
     """
-    ✅ PERFECT: Works EXACTLY like real ChatGPT - Solves problem FIRST, then matches options
+    ✅ SIMPLE & EFFECTIVE: Uses straightforward prompt that works consistently
     """
-    try:
-        print("\n🧠 Asking GPT-4 Knowledge Base (Real ChatGPT Style)...")
-       
-        # ✅ Check if "সবগুলোই" or "all of the above" is an option
-        has_all_option = False
-        all_option_text = None
-        for opt in options:
-            if opt and opt.strip().lower() in ['সবগুলোই', 'সবগুলো', 'all of the above', 'all of these', 'all above']:
-                has_all_option = True
-                all_option_text = opt.strip()
-                break
-       
-        # ✅ COMBINED: All previous instructions + strict "সবগুলোই" handling
-        if has_all_option:
-            system_msg = f"""You are ChatGPT, a helpful assistant and expert in Bengali language, literature, history, and grammar.
-
-🚨 CRITICAL INSTRUCTION - THIS QUESTION HAS "{all_option_text}" OPTION:
-
-YOU MUST FOLLOW THIS EXACT PROCESS:
-1. Analyze EACH individual option (except "{all_option_text}") separately
-2. For EACH option, clearly state: "Option X: CORRECT/INCORRECT - [reason]"
-3. After checking ALL options:
-   - If ALL options are CORRECT → Answer is "{all_option_text}"
-   - If even ONE option is INCORRECT → Answer is NOT "{all_option_text}"
-
-EXAMPLE FORMAT:
-বিশ্লেষণ:
-Option 1 (গভর্নমেন্ট গেজেট): CORRECT - কারণ জন ক্লার্ক মার্শম্যান ১৮৪০ সালে এর সম্পাদক ছিলেন
-Option 2 (সমাচার দর্পণ): CORRECT - কারণ তিনি ১৮১৮-১৮৪১ পর্যন্ত এটি সম্পাদনা করেন
-Option 3 (দিগদর্শন): CORRECT - কারণ এটিও তাঁর সম্পাদিত পত্রিকা ছিল
-
-সিদ্ধান্ত: যেহেতু তিনটি অপশনই সঠিক, উত্তর: {all_option_text}
-
-IMPORTANT INSTRUCTIONS:
-- For Bengali language/grammar/literature/history questions, use your deep knowledge to answer accurately
-- If you have reliable knowledge from your training data, provide the answer confidently with clear reasoning
-- If the question is about events, data, or information AFTER your knowledge cutoff (October 2023), respond with exactly: "NEEDS_WEB_SEARCH"
-- If you lack reliable information about ANY option, respond with: "NEEDS_WEB_SEARCH"
-- Do NOT give uncertain answers. Either answer confidently OR say "NEEDS_WEB_SEARCH"
-- Do NOT assume all options are correct just because "{all_option_text}" exists
-- CHECK EACH OPTION INDIVIDUALLY with evidence
-- For Bengali questions, answer in Bengali with clear explanation"""
-        else:
-            # Regular system message for non-"সবগুলোই" questions
-            system_msg = """You are ChatGPT, a helpful assistant and expert in Bengali language, literature, history, and grammar. Solve problems step by step, showing your work clearly.
-
-IMPORTANT INSTRUCTIONS:
-- For Bengali language/grammar/literature/history questions, use your deep knowledge of বাংলা ব্যাকরণ (Bengali grammar) to answer accurately
-- If you have reliable knowledge from your training data, provide the answer confidently with clear reasoning
-- If the question is about events, data, or information AFTER your knowledge cutoff (October 2023), respond with exactly: "NEEDS_WEB_SEARCH"
-- If the question requires current/recent information you don't have, respond with: "NEEDS_WEB_SEARCH"
-- Do NOT give uncertain answers or say "I don't have information" unless truly necessary. Either answer confidently OR say "NEEDS_WEB_SEARCH"
-- For Bengali questions, answer in Bengali with clear explanation
-- CRITICAL: When analyzing options, examine EACH option carefully against the question criteria"""
-
-        opts_formatted = "\n".join([f"{i+1}. {o}" for i, o in enumerate(options) if o])
-       
-        user_msg = f"""{question}
-
-বিকল্পসমূহ:
-{opts_formatted}
-
-{"প্রতিটি বিকল্প আলাদাভাবে যাচাই করুন এবং" if has_all_option else "প্রতিটি বিকল্প সাবধানে বিশ্লেষণ করুন এবং"} সঠিক উত্তর বলুন। আপনার যুক্তি ব্যাখ্যা করুন। যদি আপনার কাছে নির্ভরযোগ্য তথ্য না থাকে, শুধু "NEEDS_WEB_SEARCH" লিখুন।"""
-
+    max_attempts = 2
+    
+    for attempt in range(max_attempts):
         try:
-            print(f"   Using: gpt-4o (same as ChatGPT)")
+            if attempt > 0:
+                print(f"\n   🔄 Retry attempt {attempt + 1}/{max_attempts}")
+            
+            print(f"\n🧠 Asking {settings.llm_provider.upper()} Knowledge Base...")
+           
+            # Check for "all of the above" option
+            has_all_option = False
+            all_option_text = None
+            for opt in options:
+                if opt and opt.strip().lower() in ['সবগুলোই', 'সবগুলো', 'all of the above', 'all of these', 'all above']:
+                    has_all_option = True
+                    all_option_text = opt.strip()
+                    break
+           
+            # Format options
+            options_text = "\n".join([f"{i+1}. {o}" for i, o in enumerate(options) if o])
+            
+            # ✅ SIMPLE PROMPT - Gets straight to the point
             if has_all_option:
-                print(f"   ⚠️ SPECIAL MODE: '{all_option_text}' option detected - will verify ALL options")
+                prompt = f"""You are an expert validator for academic questions. Analyze and determine the correct answer.
+
+Question: {question}
+
+Options:
+{options_text}
+
+⚠️ SPECIAL: Option "{all_option_text}" is present. You MUST check EACH option individually.
+
+Instructions:
+1. Identify question category (ব্যাকরণ/সাহিত্য/ইতিহাস/গণিত)
+2. Apply appropriate reasoning (grammar rules, calculations, etc.)
+3. Check each option:
+   - Option 1: CORRECT/INCORRECT - [why]
+   - Option 2: CORRECT/INCORRECT - [why]
+   - Option 3: CORRECT/INCORRECT - [why]
+4. Determine answer:
+   - If ALL options CORRECT → Answer is "{all_option_text}"
+   - If even ONE INCORRECT → Answer is NOT "{all_option_text}"
+
+Respond clearly:
+- Category: [type]
+- Correct Answer: [number and text]
+- সঠিক উত্তর: [answer]
+
+If you don't have reliable information, respond only: "NEEDS_WEB_SEARCH" """
+            else:
+                prompt = f"""You are an expert validator for academic questions. Analyze and determine the correct answer.
+
+Question: {question}
+
+Options:
+{options_text}
+
+Instructions:
+1. Identify question category (ব্যাকরণ/সাহিত্য/ইতিহাস/গণিত)
+2. Apply appropriate reasoning (grammar rules, calculations, etc.)
+3. Determine correct answer
+4. Provide clear justification
+
+Respond clearly:
+- Category: [type]
+- Correct Answer: [number and text]
+- সঠিক উত্তর: [answer]
+
+If you don't have reliable information, respond only: "NEEDS_WEB_SEARCH" """
+
+            print(f"   Using: {settings.llm_provider}")
+            if has_all_option:
+                print(f"   ⚠️ SPECIAL MODE: '{all_option_text}' option detected")
            
-            response = openai_client.chat.completions.create(
-                model="gpt-4o",
-                temperature=0,
-                max_tokens=2500,  # More tokens for detailed analysis
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg}
-                ]
-            )
+            # Call LLM with empty system message (all info in user prompt)
+            result_text = call_llm("", prompt, temperature=0, max_tokens=8000)
            
-            result_text = response.choices[0].message.content.strip()
-            print(f"   ✓ Got response")
-            print(f"   📝 GPT Full Response:")
-            print(f"   {result_text}")
+            print(f"   ✓ Got response (length: {len(result_text)} chars)")
+            
+            # ✅ Check if response is complete
+            if len(result_text) < 300:
+                print(f"   ⚠️ Response too short ({len(result_text)} chars)")
+                if attempt < max_attempts - 1:
+                    continue
+                else:
+                    return None
+            
+            print(f"   📝 Response preview: {result_text[:500]}...")
             print()
            
-            # ✅ CHECK: Does GPT need web search?
+            # Check for web search signal
             if "NEEDS_WEB_SEARCH" in result_text:
-                print(f"   ⚠ GPT indicated it needs web search for this question")
+                print(f"   ⚠ LLM indicated it needs web search")
                 return None
            
-            # ✅ CHECK: Is GPT saying it doesn't have information?
+            # Check for uncertainty
             no_info_patterns = [
-                "আমার কাছে নির্দিষ্ট তথ্য নেই",
-                "আমার কাছে তথ্য নেই",
                 "I don't have information",
-                "I don't have specific information",
                 "I cannot determine",
+                "আমার কাছে তথ্য নেই",
                 "I'm not certain",
-                "beyond my knowledge cutoff",
-                "after my training data",
-                "২০২৩ সালের অক্টোবর পর্যন্ত",
-                "আমি নিশ্চিত নই",
-                "নিশ্চিত করতে পারছি না"
             ]
             
             for pattern in no_info_patterns:
                 if pattern.lower() in result_text.lower():
-                    print(f"   ⚠ GPT doesn't have reliable information (found: '{pattern}')")
+                    print(f"   ⚠ LLM doesn't have reliable information")
                     return None
            
-            # ✅ Extract the CALCULATED answer value from GPT's solution
+            # ✅ Extract answer - Multiple strategies
+            
+            # Strategy 1: Look for explicit patterns
+            explicit_patterns = [
+                r'সঠিক উত্তর:\s*\d*\.?\s*(.+?)(?:\n|$)',
+                r'Correct Answer:\s*\d*\.?\s*(.+?)(?:\n|$)',
+                r'উত্তর:\s*\d*\.?\s*(.+?)(?:\n|$)',
+            ]
+            
+            for pattern in explicit_patterns:
+                match = re.search(pattern, result_text, re.IGNORECASE | re.UNICODE)
+                if match:
+                    potential_answer = match.group(1).strip()
+                    potential_answer = re.sub(r'^\d+\.?\s*', '', potential_answer)
+                    potential_answer = potential_answer.rstrip('।').rstrip('.').strip()
+                    potential_answer = potential_answer.split('\n')[0].strip()
+                    
+                    print(f"   🎯 Found answer via pattern: '{potential_answer}'")
+                    
+                    # Match against options
+                    for opt in options:
+                        if not opt:
+                            continue
+                        opt_clean = opt.strip()
+                        
+                        if (opt_clean.lower() == potential_answer.lower() or 
+                            potential_answer.lower() in opt_clean.lower() or 
+                            opt_clean.lower() in potential_answer.lower()):
+                            print(f"✓ LLM Knowledge ({settings.llm_provider}): '{opt_clean}'")
+                            return opt_clean
+            
+            # Strategy 2: Scoring method
+            print("   ⚠ No explicit answer found, using scoring...")
+            
             best_match = None
-            best_match_score = 0
-           
+            best_score = 0
+            
             for i, opt in enumerate(options):
                 if not opt:
                     continue
                     
                 opt_clean = opt.strip()
                 score = 0
-               
-                # ✅ Higher weight for "সবগুলোই" if GPT explicitly confirms all are correct
-                if has_all_option and opt_clean.lower() in ['সবগুলোই', 'সবগুলো', 'all of the above', 'all of these']:
+                
+                # Check for "all options correct" phrases
+                if has_all_option and opt_clean.lower() in ['সবগুলোই', 'সবগুলো', 'all of the above']:
                     all_correct_phrases = [
-                        "সব অপশনই সঠিক",
-                        "সবগুলোই সঠিক",
-                        "সকল অপশন সঠিক",
-                        "তিনটিই সঠিক",
-                        "তিনটি অপশনই সঠিক",
                         "all options are correct",
-                        "all are correct",
-                        "all three are correct"
+                        "সব অপশনই সঠিক",
+                        "all correct",
                     ]
                     for phrase in all_correct_phrases:
                         if phrase.lower() in result_text.lower():
-                            score += 50  # Very high score
-                            print(f"   🎯 Found confirmation that all options are correct: '{phrase}'")
+                            score += 50
                             break
-               
-                # Check for exact match
+                
+                # High score for answer indicators
+                if f"Correct Answer: {i+1}" in result_text or f"সঠিক উত্তর: {opt_clean}" in result_text:
+                    score += 50
+                
+                # Medium score for appearing in last 400 chars
+                if opt_clean in result_text[-400:]:
+                    score += 20
+                
+                # Low score for general presence
                 if opt_clean in result_text:
-                    score += 10
-               
-                # Check for answer patterns
-                answer_indicators = [
-                    f"উত্তর: {opt_clean}",
-                    f"উত্তর {opt_clean}",
-                    f"সঠিক উত্তর: {opt_clean}",
-                    f"সঠিক উত্তর {opt_clean}",
-                    f"উত্তরটি হলো: {opt_clean}",
-                    f"উত্তরটি হলো {opt_clean}",
-                    f"উত্তর হবে: {opt_clean}",
-                    f"উত্তর হবে {opt_clean}",
-                    f"সিদ্ধান্ত: {opt_clean}",
-                    f"Answer: {opt_clean}",
-                    f"Correct answer: {opt_clean}"
-                ]
+                    score += 5
                 
-                for indicator in answer_indicators:
-                    if indicator in result_text:
-                        score += 30
-                        break
-               
-                # Check if option appears in conclusion (last 400 chars)
-                last_400_chars = result_text[-400:]
-                if opt_clean in last_400_chars:
-                    score += 8
+                print(f"   Option {i+1} ('{opt_clean}'): {score} points")
                 
-                # For multi-word options, check individual significant words
-                opt_words = [w for w in opt_clean.split() if len(w) > 2]
-                matching_words = sum(1 for word in opt_words if word in result_text)
-                if opt_words:
-                    score += (matching_words / len(opt_words)) * 5
-               
-                print(f"   Option {i+1} ('{opt_clean}'): Score = {score}")
-               
-                if score > best_match_score:
-                    best_match_score = score
+                if score > best_score:
+                    best_score = score
                     best_match = opt_clean
-           
-            # ✅ Minimum threshold for confidence
-            if best_match and best_match_score >= 10:
-                print(f"✓ GPT Knowledge (gpt-4o): Matched answer from solution")
-                print(f"  ✓ Answer: '{best_match}' (score: {best_match_score})")
+            
+            if best_match and best_score >= 20:
+                print(f"✓ LLM Knowledge ({settings.llm_provider}): '{best_match}' (score: {best_score})")
                 return best_match
+            
+            print(f"   ⚠ Could not extract answer (best score: {best_score})")
+            
+            if attempt >= max_attempts - 1:
+                return None
            
-            # Method 2: Look for explicit answer patterns in Bengali/English
-            answer_patterns = [
-                r'উত্তর[:\s]+([^\n\.।]+)',
-                r'সঠিক উত্তর[:\s]+([^\n\.।]+)',
-                r'উত্তরটি হলো[:\s]+([^\n\.।]+)',
-                r'সিদ্ধান্ত[:\s]+([^\n\.।]+)',
-                r'Answer[:\s]+([^\n\.]+)',
-                r'Correct answer[:\s]+([^\n\.]+)',
-            ]
-           
-            for pattern in answer_patterns:
-                match = re.search(pattern, result_text, re.IGNORECASE)
-                if match:
-                    potential_answer = match.group(1).strip()
-                    print(f"   Found potential answer via pattern: '{potential_answer}'")
-                   
-                    # Check which option this matches
-                    for opt in options:
-                        if not opt:
-                            continue
-                        opt_clean = opt.strip()
-                        if opt_clean in potential_answer or potential_answer in opt_clean:
-                            print(f"✓ GPT Knowledge (gpt-4o): Extracted from answer pattern")
-                            print(f"  ✓ Answer: '{opt_clean}'")
-                            return opt_clean
-           
-            print(f"   ⚠ Could not extract clear answer from GPT's solution")
-            print(f"   Best match was: '{best_match}' with score {best_match_score} (threshold: 10)")
-            return None
-           
-        except Exception as model_error:
-            print(f"   ✗ Error: {str(model_error)}")
+        except Exception as e:
+            print(f"   ✗ Error: {str(e)}")
             import traceback
             traceback.print_exc()
-            return None
+            if attempt >= max_attempts - 1:
+                return None
    
-    except Exception as e:
-        print(f"✗ GPT Knowledge ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-    
-    #News agent Components
+    return None
 
-
-
-
-       
 
 def get_answer_from_openai_web_search(question: str, options: List[str]) -> Optional[str]:
     """
@@ -922,57 +837,78 @@ def get_answer_from_openai_web_search(question: str, options: List[str]) -> Opti
     Uses gpt-4o-mini-search-preview model with built-in web search capability
     """
     try:
-        print("\n🌐 SOURCE 4: OpenAI Web Search (Real-time Internet Search)...")
+        from openai import OpenAI
+        print("\n🌐 SOURCE 3: OpenAI Web Search (Real-time Internet Search)...")
         
-        # Format options for better matching
         opts_formatted = "\n".join([f"{i+1}. {o}" for i, o in enumerate(options) if o])
         
-        # Create the search query
         search_prompt = f"""You are answering a quiz question using ONLY verified authoritative sources.
+
 Question: {question}
 Options:
 {opts_formatted}
+
+CRITICAL INSTRUCTIONS FOR BENGALI LANGUAGE/GRAMMAR QUESTIONS:
+- For বাংলা ব্যাকরণ (Bengali grammar) questions, prioritize:
+  1. NCTB textbooks (National Curriculum and Textbook Board)
+  2. Bengali grammar books by established authors (হায়াৎ মামুদ, মুনীর চৌধুরী)
+  3. Academic sources (.edu.bd domains)
+  4. Established Bengali language resources
+- DO NOT rely on general web articles or blogs for grammar rules
+- Grammar definitions must match NCTB curriculum exactly
+- Cross-check definitions across multiple authoritative grammar sources
+
 MANDATORY SEARCH PROCESS:
 1. Search 4-6 different TOP TIER sources based on topic
-2. Cross-reference ALL options against these sources
-3. Count votes: which option appears most in reliable sources
-4. Choose the option with highest source agreement (minimum 3 sources)
+2. For Bengali grammar: Search "NCTB বাংলা ব্যাকরণ" + question topic
+3. Cross-reference ALL options against authoritative sources
+4. Verify the DEFINITION matches the technical term being asked
+5. Count votes: which option appears most in reliable sources
+6. Choose the option with highest source agreement (minimum 3 sources)
+
 AUTHORITATIVE SOURCES BY TOPIC:
+- Bengali grammar/language: NCTB textbooks, established grammar books, .edu.bd sites
 - Bangladesh news/events: Prothom Alo, Daily Star, bdnews24, government sites
 - International news: Reuters, AP, BBC, CNN, official statements
 - Deaths/casualties: Official government reports, UN, verified news agencies
 - Historical events: Wikipedia (cross-check), Britannica, academic sources
 - Sports: ESPN, official league sites, verified sports media
 - Science/health: WHO, CDC, peer-reviewed journals, Nature, Science
-- Technology: official documentation, tech news (TechCrunch, Wired, official company sites)
+- Technology: official documentation, tech news, official company sites
 - Politics: official government sites, established news agencies
 - Entertainment: IMDB, official announcements, Variety, Hollywood Reporter
 - Geography/statistics: World Bank, UN data, official census
-- Business/Economy: Bloomberg, Reuters, Financial Times, official company reports
+- Business/Economy: Bloomberg, Reuters, Financial Times, official reports
 - Education: official university sites, education ministry, verified rankings
 - Religion: official religious texts, verified scholarly sources
 - Culture/Literature: established publishers, literary databases, verified reviews
 - Law/Legal: official government legal sites, verified legal databases
-FOR UNLISTED TOPICS:
-1. Identify the topic category first
-2. Search for: "[topic] official source" OR "[topic] authoritative database"
-3. Use: Government sites (.gov), Educational institutions (.edu), International organizations (.org from UN/WHO etc)
-4. Cross-reference with: Established news agencies (Reuters, AP, BBC)
-5. Avoid: Personal blogs, forums, unverified sites, social media
+
+FOR BENGALI GRAMMAR QUESTIONS - SPECIAL INSTRUCTIONS:
+1. Understand the question is asking for a TECHNICAL DEFINITION
+2. Search for "রূঢ়ি শব্দ definition NCTB" or similar
+3. Read the COMPLETE definition from grammar sources
+4. Match each option against the definition
+5. Select the option that FITS the definition, not just appears in examples
+
 STRICT RULES:
 - Never trust a single source
 - Ignore blogs, forums, social media claims
+- For grammar: NCTB curriculum is the gold standard
 - For conflicting data: go with official/government source
-- For numbers: use only confirmed figures, never estimates or "up to X"
+- For numbers: use only confirmed figures, never estimates
 - Minimum 3 sources must agree before selecting answer
 - If topic is unclear, search broader then narrow down
 - For niche topics: prioritize domain experts and official organizations
+
 VERIFICATION CHECKLIST:
 ✓ Is this from a top-tier source for this topic?
+✓ For grammar: Does the definition from NCTB match?
 ✓ Do at least 3 reliable sources confirm this?
 ✓ Does this match official data (if applicable)?
 ✓ Are there any contradicting authoritative sources?
-✓ If topic is unlisted: did I find official/expert sources?
+✓ Did I verify the DEFINITION, not just find the word in examples?
+
 Return ONLY this JSON:
 {{
     "answer": "exact option text confirmed by majority of authoritative sources",
@@ -981,27 +917,24 @@ Return ONLY this JSON:
 }}
 NO markdown blocks. NO extra text. ONLY JSON."""
 
-        # ✅ Use gpt-4o-mini-search-preview (has built-in web search)
         print(f"   Using: gpt-4o-mini-search-preview")
         
+        openai_client = OpenAI(api_key=settings.openai_api_key)
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini-search-preview",  # ✅ Specialized search model
+            model="gpt-4o-mini-search-preview",
             messages=[
                 {
                     "role": "user",
                     "content": search_prompt
                 }
             ],
-            # temperature=0
         )
         
         result_text = response.choices[0].message.content.strip()
         print(f"   ✓ Got search response")
         print(f"   📝 Response: {result_text[:200]}...")
         
-        # Parse JSON response
         try:
-            # Clean JSON
             result_clean = result_text.strip()
             if '```json' in result_clean:
                 result_clean = result_clean.split('```json')[1].split('```')[0].strip()
@@ -1026,7 +959,6 @@ NO markdown blocks. NO extra text. ONLY JSON."""
             print(f"  ✗ Could not parse JSON response: {e}")
             print(f"  Response was: {result_text[:300]}")
             
-            # Fallback: Try to extract answer directly from text
             for opt in options:
                 if opt.strip() and opt.strip().lower() in result_text.lower():
                     print(f"✓ OpenAI Web Search (text match): '{opt}'")
@@ -1044,18 +976,7 @@ NO markdown blocks. NO extra text. ONLY JSON."""
 @app.post("/fact-check", response_model=FactCheckResponse)
 async def fact_check(request: FactCheckRequest):
    """
-   ✅ PERFECT COMBINED VERSION:
-   - CORRECT answer validation (with normalization)
-   - CORRECT question/logic validation (reasonable strictness)
-   - FIXED explanation validation (handles HTML entities, validates math correctly)
-   - IMPROVED GPT Knowledge Base (temperature=0 for math accuracy)
-  
-   Source Priority:
-   1. Dataset (similar question)
-   2. GPT-4 Knowledge Base (IMPROVED with better math prompts!)
-   3. Trusted News Sources
-  
-   NOTE: INPUT explanation NOT used for answer determination, only for validation
+   ✅ PERFECT COMBINED VERSION with configurable LLM (OpenAI or Gemini)
    """
    try:
        lang = detect_language(request.question) if request.language == "auto" else request.language
@@ -1066,8 +987,8 @@ async def fact_check(request: FactCheckRequest):
        print(f"Question: {request.question}")
        print(f"Given Answer: {request.answer}")
        print(f"Language: {lang}")
+       print(f"LLM Provider: {settings.llm_provider}")
       
-       # ✅ Use get_explanation() to support both fields
        explanation_text = request.get_explanation()
        has_exp = bool(explanation_text and explanation_text.strip())
        print(f"Explanation: {'PROVIDED' if has_exp else 'NOT PROVIDED'}")
@@ -1075,26 +996,24 @@ async def fact_check(request: FactCheckRequest):
            print(f"Explanation text: {explanation_text[:100]}...")
        print(f"{'='*80}\n")
       
-       # STEP 1: Validate structure
        print("STEP 1: Validating question structure, grammar, and options...")
        validation = validate_structure_only(request)
       
        if has_exp:
-           validation['explanation_valid'] = True  # Will be updated later
+           validation['explanation_valid'] = True
       
        print("✓ Validation complete\n")
       
-       # STEP 2: Find correct answer (NOT from INPUT explanation)
        print(f"{'='*80}")
        print("STEP 2: Finding Correct Answer")
        print(f"{'='*80}")
        print("⚠️  INPUT Explanation is ONLY used for validation, NOT for answer extraction")
-       print("    Answer sources: Dataset → GPT Knowledge Base → Trusted News")
+       print(f"    Answer sources: Dataset → {settings.llm_provider.upper()} Knowledge Base → OpenAI Web Search")
       
        final_answer = None
        options = [request.option1, request.option2, request.option3, request.option4]
       
-       # SOURCE 1: From dataset
+       # SOURCE 1: Dataset
        print("\n→ SOURCE 1: Dataset")
        final_answer = get_answer_from_dataset(request.question, options)
       
@@ -1103,27 +1022,17 @@ async def fact_check(request: FactCheckRequest):
        else:
            print("✗ SOURCE 1 FAILED")
       
-       # SOURCE 2: From GPT-4 knowledge base
+       # SOURCE 2: LLM Knowledge Base (Gemini or OpenAI)
        if not final_answer:
-           print("\n→ SOURCE 2: GPT-4 Knowledge Base (IMPROVED v2.0 - temperature=0)")
-           final_answer = get_answer_from_gpt_knowledge(request.question, options)
+           print(f"\n→ SOURCE 2: {settings.llm_provider.upper()} Knowledge Base")
+           final_answer = get_answer_from_llm_knowledge(request.question, options)
           
            if final_answer:
                print("✓ SOURCE 2 SUCCESS")
            else:
                print("✗ SOURCE 2 FAILED")
       
-       # SOURCE 3: From TRUSTED news sources
-    #    if not final_answer:
-    #        print("\n→ SOURCE 3: Trusted News Sources (NewsAPI)")
-    #        final_answer = get_answer_from_news(request.question, options)
-          
-    #        if final_answer:
-    #            print("✓ SOURCE 3 SUCCESS")
-    #        else:
-    #            print("✗ SOURCE 3 FAILED")
-      
-       # SOURCE 4: From OpenAI Web Search (Fallback)
+       # SOURCE 3: OpenAI Web Search
        if not final_answer:
            print("\n→ SOURCE 3: OpenAI Web Search (Real-time Internet)")
            final_answer = get_answer_from_openai_web_search(request.question, options)
@@ -1137,17 +1046,15 @@ async def fact_check(request: FactCheckRequest):
            final_answer = "Unable to determine the correct answer"
            print("\n❌ ALL SOURCES FAILED")
       
-       # STEP 3: Validate INPUT explanation against CORRECT answer
        if has_exp and final_answer and final_answer != "Unable to determine the correct answer":
            print(f"\n{'='*80}")
            print("STEP 3: Validating INPUT Explanation Against CORRECT Answer")
            print(f"{'='*80}")
-           print(f"  Correct answer from Dataset/GPT: '{final_answer}'")
+           print(f"  Correct answer from Dataset/LLM: '{final_answer}'")
            print(f"  Checking if INPUT explanation supports this answer...")
           
-           # Step 3A: Extract what answer the explanation claims
            explanation_claims_answer = get_answer_from_explanation(
-               explanation_text,  # ✅ Use explanation_text
+               explanation_text,
                request.question,
                options
            )
@@ -1155,16 +1062,14 @@ async def fact_check(request: FactCheckRequest):
            if explanation_claims_answer:
                print(f"  INPUT explanation claims answer is: '{explanation_claims_answer}'")
               
-               # Normalize both for comparison
                explanation_normalized = normalize_answer(explanation_claims_answer)
                correct_normalized = normalize_answer(final_answer)
               
                if explanation_normalized == correct_normalized:
                    print(f"  ✓ Explanation answer MATCHES correct answer")
                   
-                   # Step 3B: Validate math/facts in explanation
                    exp_validation = validate_explanation_correctness(
-                       explanation_text,  # ✅ Use explanation_text
+                       explanation_text,
                        request.question,
                        final_answer,
                        options
@@ -1183,7 +1088,6 @@ async def fact_check(request: FactCheckRequest):
                validation['explanation_valid'] = False
                validation['explanation_feedback'] = "Could not determine what answer the explanation supports"
       
-       # STEP 3: Compare given answer with correct answer (WITH NORMALIZATION)
        print(f"\n{'='*80}")
        print("STEP 4: Comparing Given Answer with Correct Answer")
        print(f"{'='*80}")
@@ -1219,26 +1123,26 @@ async def fact_check(request: FactCheckRequest):
       
        return FactCheckResponse(
            question_valid=validation.get('question_valid', True),
-           feedback=validation.get('question_feedback', ''),
+           feedback=validation.get('question_feedback', '') or '',
            logical_valid=validation.get('logical_valid', True),
            options=OptionsValidation(
                option1=OptionValidation(
-                   feedback=validation.get('option1_feedback', '')
+                   feedback=validation.get('option1_feedback', '') or ''
                ),
                option2=OptionValidation(
-                   feedback=validation.get('option2_feedback', '')
+                   feedback=validation.get('option2_feedback', '') or ''
                ),
                option3=OptionValidation(
-                   feedback=validation.get('option3_feedback', '')
+                   feedback=validation.get('option3_feedback', '') or ''
                ),
                option4=OptionValidation(
-                   feedback=validation.get('option4_feedback', '')
+                   feedback=validation.get('option4_feedback', '') or ''
                ),
                option5=OptionValidation(
-                   feedback=validation.get('option5_feedback', '')
+                   feedback=validation.get('option5_feedback', '') or ''
                ),
                options_consistency_valid=validation.get('options_consistency_valid', True),
-               feedback=validation.get('options_consistency_feedback', '')
+               feedback=validation.get('options_consistency_feedback', '') or ''
            ),
            explanation_valid=validation.get('explanation_valid', False),
            given_answer_valid=given_answer_valid,
@@ -1259,24 +1163,26 @@ async def fact_check(request: FactCheckRequest):
 if __name__ == "__main__":
    import uvicorn
    print(f"\n{'='*80}")
-   print("🚀 Fact Checker & MCQ Validator API - FINAL PERFECT VERSION")
+   print(f"🚀 Fact Checker & MCQ Validator API - {settings.llm_provider.upper()} Version")
    print(f"{'='*80}")
+   print(f"LLM Provider: {settings.llm_provider}")
+   print(f"Embedding Type: {settings.embedding_type}")
    print("✅ PERFECT: Answer validation with normalization")
    print("✅ PERFECT: Question/logic validation (reasonable strictness)")
    print("✅ FIXED: Explanation validation (handles HTML entities correctly)")
-   print("✅ PERFECT: GPT Knowledge Base (temperature=0 for math accuracy)")
+   print(f"✅ PERFECT: {settings.llm_provider.upper()} Knowledge Base (SIMPLE prompt for consistency)")
    print("="*80)
    print("⚠️  IMPORTANT: INPUT Explanation is ONLY for validation")
    print("    It does NOT determine the answer")
    print("="*80)
    print("Answer Source Priority:")
    print("  1. Dataset (40,000+ questions, similarity 0.85+)")
-   print("  2. GPT-4 Knowledge Base (temperature=0, improved math prompts)")
-   print("  3. Trusted News Sources")
+   print(f"  2. {settings.llm_provider.upper()} Knowledge Base (simple prompt, 8000 tokens)")
+   print("  3. OpenAI Web Search (Real-time Internet)")
    print("")
    print("Explanation Validation:")
    print("  - Extracts what answer explanation claims")
-   print("  - Compares with correct answer from Dataset/GPT")
+   print(f"  - Compares with correct answer from Dataset/{settings.llm_provider.upper()}")
    print("  - Validates math and factual correctness (ignores HTML entities)")
    print("  - Sets explanation_valid field in response")
    print(f"{'='*80}\n")

@@ -34,24 +34,19 @@ class DataPreprocessor:
         texts = []
         
         for item in data:
-            # IMPORTANT: Only use the question for embedding
-            # This must match what backend.py does during search
             question_text = item.get('question', '').strip()
             
-            # Skip if question is empty
             if not question_text:
                 print(f"  Warning: Skipping item {item.get('id')} - empty question")
                 continue
             
-            # Clean question text
-            question_text = question_text.replace('\x00', '')  # Remove null chars
-            question_text = ' '.join(question_text.split())  # Normalize whitespace
+            question_text = question_text.replace('\x00', '')
+            question_text = ' '.join(question_text.split())
             
-            # Store document metadata
             document = {
                 "id": item.get('id'),
                 "question": question_text,
-                "answer": item.get('answer'),  # This is the index of correct answer
+                "answer": item.get('answer'),
                 "explanation": item.get('explain', ''),
                 "options": json.dumps({
                     "option1": item.get('option1', ''),
@@ -63,7 +58,7 @@ class DataPreprocessor:
             }
             
             documents.append(document)
-            texts.append(question_text)  # Only embed the question
+            texts.append(question_text)
         
         return documents, texts
     
@@ -78,25 +73,24 @@ class DataPreprocessor:
         print(f"Embedding: {settings.embedding_type}")
         print("="*70)
         
-        # Load dataset
         data = self.load_dataset(settings.dataset_path)
         
-        # Prepare documents
         print("\nPreparing documents...")
         documents, texts = self.prepare_documents(data)
         print(f"✓ Prepared {len(documents)} documents")
         print(f"✓ Using ONLY questions for embeddings (not options/explanations)")
         
-        # Generate embeddings
         print("\nGenerating embeddings...")
         
-        # Use larger batch size for local embeddings with GPU
-        if settings.embedding_type == "local":
-            batch_size = 1000  # Much larger for local GPU
-            print(f"Using GPU-optimized batch size: {batch_size}")
+        if settings.embedding_type == "gemini":
+            batch_size = 100
+            print(f"Using Gemini batch size: {batch_size}")
+        elif settings.embedding_type == "openai":
+            batch_size = 100
+            print(f"Using OpenAI batch size: {batch_size}")
         else:
-            batch_size = 100  # OpenAI API limit
-            print(f"Using API batch size: {batch_size}")
+            batch_size = 1000
+            print(f"Using local GPU batch size: {batch_size}")
         
         all_embeddings = []
         
@@ -107,12 +101,10 @@ class DataPreprocessor:
         
         print(f"✓ Generated {len(all_embeddings)} embeddings")
         
-        # Create collection
         dimension = len(all_embeddings[0])
         print(f"\nCreating vector database collection (dimension: {dimension})...")
         self.vector_db.create_collection(collection_name, dimension)
         
-        # Store in vector database
         print("Storing embeddings in vector database...")
         self.vector_db.add_documents(collection_name, documents, all_embeddings)
         
@@ -120,7 +112,6 @@ class DataPreprocessor:
         print("VERIFYING STORAGE")
         print("="*60)
         
-        # Test retrieval with a sample
         print("Testing retrieval with sample question...")
         sample_question = documents[0]['question']
         print(f"Sample question: {sample_question[:100]}...")
@@ -139,7 +130,6 @@ class DataPreprocessor:
         print("\n✓ Storage verification successful!")
         print("="*60)
         
-        # Close connection
         self.vector_db.close()
         
         print("\n" + "="*70)
@@ -163,7 +153,7 @@ def main():
         print("="*70)
         print("\nNext steps:")
         print("1. Start the backend server: python backend.py")
-        print("2. Test the API: http://localhost:8000/docs")
+        print("2. Test the API: http://localhost:7001/docs")
         print("="*70)
         
     except FileNotFoundError as e:

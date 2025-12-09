@@ -30,7 +30,7 @@ def test_connection():
             hosts=[{'host': 'localhost', 'port': 9200}],
             http_compress=True,
             http_auth=('admin', 'admin12345678'),
-            use_ssl=True,
+            use_ssl=False,
             verify_certs=False,
             ssl_assert_hostname=False,
             ssl_show_warn=False

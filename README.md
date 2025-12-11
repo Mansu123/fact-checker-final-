@@ -46,7 +46,7 @@ USER INPUT
 │     IF GPT-4 doesn't know                           │
 │     → Search vector DB for news                     │
 │     → Only use: Prothom Alo, The Daily Star,       │
-│       BBC Bangla, Bangladesh Pratidin, NCTB        │
+│       BBC Bangla, Bangladesh Pratidin, NCTB, goverment website        │
 │     → Confidence must be ≥70%                       │
 │     → If found → DONE                               │
 │                                                      │

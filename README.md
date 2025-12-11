@@ -10,7 +10,7 @@ This system validates MCQ (Multiple Choice Questions) by checking grammar, relev
 ```
 USER INPUT
     ↓
-[Question + 4 Options + Given Answer + Optional Explanation]
+[Question + 4/5 Options + Given Answer + Optional Explanation]
     ↓
 ┌─────────────────────────────────────────────────────┐
 │  STEP 1: VALIDATION (Grammar & Relevance)           │

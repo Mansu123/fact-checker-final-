@@ -25,14 +25,20 @@ USER INPUT
 ┌─────────────────────────────────────────────────────┐
 │  STEP 2: FIND CORRECT ANSWER (4 Sources)            │
 │                                                      │
-│  📝 SOURCE 1: User's Explanation                    │
-│     IF explanation provided & valid                 │
-│     → Extract answer using GPT-4                    │
-│     → DONE                                          │
+│  📝 SOURCE 1: Dataset                               │
+│     IF news not found                               │
+│     → Find similar question in OpenSearch           │
+│     → Check similarity score for question and option ≥0.85                  │
+│     → Priority:                                     │
+│       1. Extract from dataset's explanation         │
+│       2. Use dataset's answer number (1,2,3,4)      │
+│     → Convert to text option                        │
+│     → If found → DONE                                      │
 │                                                      │
-│  🧠 SOURCE 2: GPT-4 Knowledge Base                  │
+│  🧠 SOURCE 2: Gemni flash lite  Knowledge Base                  │
 │     IF no explanation                               │
-│     → Ask GPT-4 using OpenAI API                    │
+│     → Ask gemini-2.5-flash-lite using for general question
+      - And GPT 4 o mini for math question since it works better              │
 │     → Confidence must be ≥70%                       │
 │     → If confident → DONE                           │
 │                                                      │
@@ -44,15 +50,7 @@ USER INPUT
 │     → Confidence must be ≥70%                       │
 │     → If found → DONE                               │
 │                                                      │
-│  💾 SOURCE 4: Dataset                               │
-│     IF news not found                               │
-│     → Find similar question in OpenSearch           │
-│     → Check similarity score ≥0.12                  │
-│     → Priority:                                     │
-│       1. Extract from dataset's explanation         │
-│       2. Use dataset's answer number (1,2,3,4)      │
-│     → Convert to text option                        │
-│     → If found → DONE                               │
+│                               │
 │                                                      │
 │  ❌ FALLBACK: If all fail                           │
 │     → "Unable to determine the correct answer"      │

@@ -18,7 +18,9 @@ USER INPUT
 │  ✓ Check each option grammar                        │
 │  ✓ Check if options are RELEVANT to question        │
 │  ✓ Check options consistency                        │
-│  ✓ Check explanation (if provided)                  │
+│  ✓ Check explanation (if provided)
+   - Question logic test and expnation correct or not
+              │
 └────────────────────┬────────────────────────────────┘
                      │
                      ▼

@@ -30,8 +30,8 @@ class LLMService:
                 raise Exception("OPENAI_API_KEY not found in .env file for math routing")
             self.openai_client = OpenAI(api_key=settings.openai_api_key)
             
-            print(f"✓ Using Gemini Pro: gemini-2.5-flash-lite(general questions)")
-            print(f"✓ Using GPT-4o-mini: gpt-4o-mini (ALL math questions)")
+            print(f"✓ Using Gemini Pro: gemini-2.5-flash-lite (general questions)")
+            print(f"✓ Using GPT-4o-mini: gpt-4o-mini (math questions - FAST mode)")
         else:
             from openai import OpenAI
             self.client = OpenAI(api_key=settings.openai_api_key)
@@ -151,21 +151,22 @@ Please solve step by step and provide your answer in the format: ANSWER: [option
         # ✅ SMART ROUTING - Now uses shared function from utils
         is_math = is_math_question(user_message)  # ← Changed from self._is_math_question()
         
-        # TIER 1: ALL Math → GPT-4o-mini (proven working!)
+        # TIER 1: ALL Math → GPT-4o-mini (⚡ OPTIMIZED FOR SPEED)
         if is_math and self.provider == "gemini":
-            print(f"   🎯 MATH detected - routing to GPT-4o-mini")
+            print(f"   🎯 MATH detected - routing to GPT-4o-mini (⚡ FAST mode)")
             
             # ✅ Format question to explicitly ask for ANSWER: [number]
             formatted_message = self._format_math_question(user_message)
             
-            # ✅ WORKING PROMPT from Colab - Don't change!
-            math_system_prompt = "You are a helpful math tutor. Solve problems step by step."
+            # ⚡ OPTIMIZED: Shorter system prompt for speed
+            math_system_prompt = "You are a math tutor. Be concise."
             
             try:
                 response = self.openai_client.chat.completions.create(
                     model="gpt-4o-mini",
                     temperature=0,
                     max_tokens=max_tokens,
+                    timeout=10.0,  # ⚡ 10 second timeout for speed
                     messages=[
                         {"role": "system", "content": math_system_prompt},
                         {"role": "user", "content": formatted_message}
